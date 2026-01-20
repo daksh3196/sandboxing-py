@@ -3,6 +3,8 @@ from pydantic import BaseModel
 import requests
 import json
 
+from backend.rag.retrieve import retrieve_context
+
 app = FastAPI()
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -23,6 +25,51 @@ def analyze_match(request: MatchRequest):
         4. Output ONLY valid JSON. No markdown, no explanations.
     """
     user_prompt = f"""
+        Match Summary:
+        {request.match_summary}
+
+        Return JSON in this format only:
+        {{
+        "strengths": [],
+        "mistakes": [],
+        "training_focus": []
+        }}
+    """
+
+    payload = {
+        "model": MODEL,
+        "prompt": system_prompt + "\n\n" + user_prompt,
+        "stream": False
+    }
+
+    response = requests.post(OLLAMA_URL, json=payload)
+    raw_output = response.json()["response"]
+
+    try:
+        parsed_output = json.loads(raw_output)
+    except Exception:
+        return {
+            "error": "Invalid AI output",
+            "raw_output": raw_output
+        }
+
+    return parsed_output
+
+@app.post("/analyze-match-with-rag")
+def analyze_match_with_rag(request: MatchRequest):
+    context = retrieve_context(request.match_summary)
+    system_prompt = """
+        You are a professional badminton coach.
+
+        Rules:
+        1. Be concise and factual.
+        2. Do not make up statistics.
+        3. Base advice on amateur-level play.
+        4. Output ONLY valid JSON. No markdown, no explanations.
+    """
+    user_prompt = f"""
+        Use ONLY the following knowledge while answering:
+        {context}
         Match Summary:
         {request.match_summary}
 

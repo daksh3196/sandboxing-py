@@ -1,0 +1,3 @@
+Badminton follows a rally point scoring system.
+A match is played as best of three games of 21 points.
+A point is scored on every rally regardless of who served.
