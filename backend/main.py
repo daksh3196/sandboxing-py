@@ -4,8 +4,11 @@ from pydantic import BaseModel, ValidationError
 import requests
 import json
 
+from backend.confidence import calculate_confidence
+from backend.logger import log_event
 from backend.rag.retrieve import retrieve_context
 from backend.schemas import MatchAnalysis
+from backend.storage import save_analysis
 
 MAX_RETRIES = 2
 SYSTEM_PROMPT = """
@@ -33,7 +36,7 @@ def call_my_llm(prompt):
     }
 
     response = requests.post(OLLAMA_URL, json=payload)
-    return response.json()["response"]
+    return response.json()["response"]  
 
 app = FastAPI()
 
@@ -93,7 +96,12 @@ def analyze_match(request: MatchRequest):
 
 @app.post("/analyze-match-with-rag")
 def analyze_match_with_rag(request: MatchRequest):
-    context = retrieve_context(request.match_summary)
+    retrieval = retrieve_context(request.match_summary)
+    log_event("request", {"summary": request.match_summary})
+    context = retrieval["context"]
+    distances = retrieval["distances"]
+    log_event("retrieval", {"distances": distances})
+
     user_prompt = f"""
 Use ONLY the following knowledge:
 {context}
@@ -104,16 +112,6 @@ Match summary:
 
     full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
 
-    # for attempt in range(MAX_RETRIES):
-    #     raw_output = call_my_llm(full_prompt)
-
-    #     try:
-    #         parsed = MatchAnalysis.model_validate_json(raw_output)
-    #         return parsed.model_dump()
-
-    #     except ValidationError:
-    #         time.sleep(0.5)
-
     for attempt in range(MAX_RETRIES):
         raw_output = call_my_llm(full_prompt)
 
@@ -122,6 +120,11 @@ Match summary:
 
         try:
             parsed = MatchAnalysis.model_validate_json(raw_output)
+            log_event("analysis", parsed.model_dump())
+            save_analysis(parsed.model_dump())
+            
+            confidence = calculate_confidence(distances, parsed)
+            parsed.confidence = confidence
             return parsed.model_dump()
 
         except ValidationError as e:
@@ -132,3 +135,11 @@ Match summary:
         "error": "AI failed to produce valid output",
         "confidence": 0.0
     }
+
+@app.post("/feedback")
+def feedback(analysis_id: int, useful: bool):
+    log_event("feedback", {
+        "analysis_id": analysis_id,
+        "useful": useful
+    })
+    return {"status": "recorded"}
