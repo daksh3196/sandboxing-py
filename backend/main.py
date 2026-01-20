@@ -1,9 +1,39 @@
+import time
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import requests
 import json
 
 from backend.rag.retrieve import retrieve_context
+from backend.schemas import MatchAnalysis
+
+MAX_RETRIES = 2
+SYSTEM_PROMPT = """
+        You are a JSON generator.
+
+Rules:
+1. Output ONLY valid JSON.
+2. Do not include any text before or after JSON.
+3. Do not explain anything.
+4. JSON must exactly match this schema:
+{
+  "strengths": ["string"],
+  "mistakes": ["string"],
+  "training_focus": ["string"],
+  "confidence": number between 0 and 1
+}
+
+    """
+
+def call_my_llm(prompt):
+    payload = {
+        "model": MODEL,
+        "prompt": prompt,
+        "stream": False
+    }
+
+    response = requests.post(OLLAMA_URL, json=payload)
+    return response.json()["response"]
 
 app = FastAPI()
 
@@ -19,10 +49,16 @@ def analyze_match(request: MatchRequest):
         You are a professional badminton coach.
 
         Rules:
-        1. Be concise and factual.
-        2. Do not make up statistics.
-        3. Base advice on amateur-level play.
-        4. Output ONLY valid JSON. No markdown, no explanations.
+            1. You MUST return valid JSON.
+            2. The JSON MUST match this schema exactly:
+                {
+                "strengths": ["string"],
+                "mistakes": ["string"],
+                "training_focus": ["string"],
+                "confidence": number between 0 and 1
+                }
+            3. Do NOT add extra keys.
+            4. Do NOT include explanations or markdown.
     """
     user_prompt = f"""
         Match Summary:
@@ -58,44 +94,41 @@ def analyze_match(request: MatchRequest):
 @app.post("/analyze-match-with-rag")
 def analyze_match_with_rag(request: MatchRequest):
     context = retrieve_context(request.match_summary)
-    system_prompt = """
-        You are a professional badminton coach.
-
-        Rules:
-        1. Be concise and factual.
-        2. Do not make up statistics.
-        3. Base advice on amateur-level play.
-        4. Output ONLY valid JSON. No markdown, no explanations.
-    """
     user_prompt = f"""
-        Use ONLY the following knowledge while answering:
-        {context}
-        Match Summary:
-        {request.match_summary}
+Use ONLY the following knowledge:
+{context}
 
-        Return JSON in this format only:
-        {{
-        "strengths": [],
-        "mistakes": [],
-        "training_focus": []
-        }}
-    """
+Match summary:
+{request.match_summary}
+"""
 
-    payload = {
-        "model": MODEL,
-        "prompt": system_prompt + "\n\n" + user_prompt,
-        "stream": False
+    full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
+
+    # for attempt in range(MAX_RETRIES):
+    #     raw_output = call_my_llm(full_prompt)
+
+    #     try:
+    #         parsed = MatchAnalysis.model_validate_json(raw_output)
+    #         return parsed.model_dump()
+
+    #     except ValidationError:
+    #         time.sleep(0.5)
+
+    for attempt in range(MAX_RETRIES):
+        raw_output = call_my_llm(full_prompt)
+
+        print("\n--- RAW LLM OUTPUT (attempt", attempt + 1, ") ---")
+        print(raw_output)
+
+        try:
+            parsed = MatchAnalysis.model_validate_json(raw_output)
+            return parsed.model_dump()
+
+        except ValidationError as e:
+            print("❌ Validation error:", e)
+
+
+    return {
+        "error": "AI failed to produce valid output",
+        "confidence": 0.0
     }
-
-    response = requests.post(OLLAMA_URL, json=payload)
-    raw_output = response.json()["response"]
-
-    try:
-        parsed_output = json.loads(raw_output)
-    except Exception:
-        return {
-            "error": "Invalid AI output",
-            "raw_output": raw_output
-        }
-
-    return parsed_output
